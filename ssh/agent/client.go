@@ -9,7 +9,7 @@
 //
 // References:
 //  [PROTOCOL.agent]:    http://cvsweb.openbsd.org/cgi-bin/cvsweb/src/usr.bin/ssh/PROTOCOL.agent?rev=HEAD
-package agent // import "github.com/afitzek/crypto/ssh/agent"
+package agent // import "github.com/resin-io-playground/go-crypto-fork/ssh/agent"
 
 import (
 	"bytes"
@@ -26,7 +26,7 @@ import (
 	"sync"
 
 	"golang.org/x/crypto/ed25519"
-	"github.com/afitzek/crypto/ssh"
+	"github.com/resin-io-playground/go-crypto-fork/ssh"
 )
 
 // Agent represents the capabilities of an ssh-agent.

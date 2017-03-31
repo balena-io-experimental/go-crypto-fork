@@ -57,6 +57,93 @@ type handshakeMagics struct {
 	clientKexInit, serverKexInit []byte
 }
 
+// KexMagic is the remote kex request structure
+type KexMagic struct {
+	ClientVersion, ServerVersion []byte
+	ClientKexInit, ServerKexInit []byte
+}
+
+// KexRemoteRequest is the remote kex request structure
+type KexRemoteRequest struct {
+	Magics  KexMagic
+	InitPkt []byte
+	KexAlgo string
+}
+
+// KexRemoteResponse is the remote kex response structure
+type KexRemoteResponse struct {
+	Result      *kexResult
+	ResponsePkt []byte
+	AuthToken   string
+}
+
+// KexRemote is an interface to perform remote kex
+type KexRemote interface {
+	Request(kexRequest *KexRemoteRequest) (*KexRemoteResponse, error)
+}
+
+type LocalKex struct {
+	kex    kexAlgorithm
+	signer Signer
+}
+
+/*
+type RemoteKex struct {
+	config *Config
+}*/
+
+func (kex *LocalKex) Request(kexRequest *KexRemoteRequest) (*KexRemoteResponse, error) {
+	result, reply, err := kex.kex.ServerRemoteExec(rand.Reader, &handshakeMagics{
+		clientKexInit: kexRequest.Magics.ClientKexInit,
+		clientVersion: kexRequest.Magics.ClientVersion,
+		serverKexInit: kexRequest.Magics.ServerKexInit,
+		serverVersion: kexRequest.Magics.ServerVersion,
+	}, kex.signer, kexRequest.InitPkt)
+
+	return &KexRemoteResponse{
+		Result:      result,
+		ResponsePkt: reply,
+	}, err
+}
+
+/*
+func (kex *RemoteKex) Request(kexRequest *KexRemoteRequest) (*KexRemoteResponse, error) {
+	url := kex.config.RemoteKexService
+
+	jsonStr, err := json.Marshal(kexRequest)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonStr))
+	req.Header.Set("X-REPLACE_WITHSECRET", kex.config.RemoteKexService)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	log.Println("Requesting KEX from server")
+	resp, err := client.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+	log.Println("Got KEX from server")
+	decoder := json.NewDecoder(resp.Body)
+	var t KexRemoteResponse
+	err = decoder.Decode(&t)
+
+	return &t, nil
+}*/
+
+func NewKexRemoteBackend(name string, signer Signer) KexRemote {
+	return &LocalKex{
+		kex:    kexAlgoMap[name],
+		signer: signer,
+	}
+}
+
+/*
+func NewKexRemote(config *Config) KexRemote {
+	return &RemoteKex{
+		config: config,
+	}
+}*/
+
 func (m *handshakeMagics) write(w io.Writer) {
 	writeString(w, m.clientVersion)
 	writeString(w, m.serverVersion)
@@ -69,6 +156,10 @@ type kexAlgorithm interface {
 	// Server runs server-side key agreement, signing the result
 	// with a hostkey.
 	Server(p packetConn, rand io.Reader, magics *handshakeMagics, s Signer) (*kexResult, error)
+
+	// Server runs server-side key agreement, signing the result
+	// with a hostkey.
+	ServerRemoteExec(rand io.Reader, magics *handshakeMagics, s Signer, initPkt []byte) (*kexResult, []byte, error)
 
 	// Client runs the client-side key agreement. Caller is
 	// responsible for verifying the host key signature.
@@ -140,6 +231,67 @@ func (group *dhGroup) Client(c packetConn, randSource io.Reader, magics *handsha
 		Signature: kexDHReply.Signature,
 		Hash:      crypto.SHA1,
 	}, nil
+}
+
+func (group *dhGroup) ServerRemoteExec(randSource io.Reader, magics *handshakeMagics, priv Signer, clientPacket []byte) (result *kexResult, replyPacket []byte, err error) {
+
+	hashFunc := crypto.SHA1
+	var kexDHInit kexDHInitMsg
+	if err = Unmarshal(clientPacket, &kexDHInit); err != nil {
+		return
+	}
+
+	var y *big.Int
+	for {
+		if y, err = rand.Int(randSource, group.pMinus1); err != nil {
+			return
+		}
+		if y.Sign() > 0 {
+			break
+		}
+	}
+
+	Y := new(big.Int).Exp(group.g, y, group.p)
+	kInt, err := group.diffieHellman(kexDHInit.X, y)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	hostKeyBytes := priv.PublicKey().Marshal()
+
+	h := hashFunc.New()
+	magics.write(h)
+	writeString(h, hostKeyBytes)
+	writeInt(h, kexDHInit.X)
+	writeInt(h, Y)
+
+	K := make([]byte, intLength(kInt))
+	marshalInt(K, kInt)
+	h.Write(K)
+
+	H := h.Sum(nil)
+
+	// H is already a hash, but the hostkey signing will apply its
+	// own key-specific hash algorithm.
+	sig, err := signAndMarshal(priv, randSource, H)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	kexDHReply := kexDHReplyMsg{
+		HostKey:   hostKeyBytes,
+		Y:         Y,
+		Signature: sig,
+	}
+	packet := Marshal(&kexDHReply)
+
+	return &kexResult{
+		H:         H,
+		K:         K,
+		HostKey:   hostKeyBytes,
+		Signature: sig,
+		Hash:      crypto.SHA1,
+	}, packet, nil
 }
 
 func (group *dhGroup) Server(c packetConn, randSource io.Reader, magics *handshakeMagics, priv Signer) (result *kexResult, err error) {
@@ -306,6 +458,82 @@ func validateECPublicKey(curve elliptic.Curve, x, y *big.Int) bool {
 	return true
 }
 
+func (kex *ecdh) ServerRemoteReq(c packetConn, rand io.Reader, magics *handshakeMagics, priv Signer) (result *kexResult, err error) {
+	packet, err := c.readPacket()
+	if err != nil {
+		return
+	}
+
+	result, replyData, err := kex.ServerRemoteExec(rand, magics, priv, packet)
+
+	if err := c.writePacket(Marshal(&replyData)); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (kex *ecdh) ServerRemoteExec(rand io.Reader, magics *handshakeMagics, priv Signer, clientPacket []byte) (result *kexResult, replyPacket []byte, err error) {
+	var kexECDHInit kexECDHInitMsg
+	if err = Unmarshal(clientPacket, &kexECDHInit); err != nil {
+		return nil, nil, err
+	}
+
+	clientX, clientY, err := unmarshalECKey(kex.curve, kexECDHInit.ClientPubKey)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// We could cache this key across multiple users/multiple
+	// connection attempts, but the benefit is small. OpenSSH
+	// generates a new key for each incoming connection.
+	ephKey, err := ecdsa.GenerateKey(kex.curve, rand)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	hostKeyBytes := priv.PublicKey().Marshal()
+
+	serializedEphKey := elliptic.Marshal(kex.curve, ephKey.PublicKey.X, ephKey.PublicKey.Y)
+
+	// generate shared secret
+	secret, _ := kex.curve.ScalarMult(clientX, clientY, ephKey.D.Bytes())
+
+	h := ecHash(kex.curve).New()
+	magics.write(h)
+	writeString(h, hostKeyBytes)
+	writeString(h, kexECDHInit.ClientPubKey)
+	writeString(h, serializedEphKey)
+
+	K := make([]byte, intLength(secret))
+	marshalInt(K, secret)
+	h.Write(K)
+
+	H := h.Sum(nil)
+
+	// H is already a hash, but the hostkey signing will apply its
+	// own key-specific hash algorithm.
+	sig, err := signAndMarshal(priv, rand, H)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	reply := kexECDHReplyMsg{
+		EphemeralPubKey: serializedEphKey,
+		HostKey:         hostKeyBytes,
+		Signature:       sig,
+	}
+
+	serialized := Marshal(&reply)
+
+	return &kexResult{
+		H:         H,
+		K:         K,
+		HostKey:   reply.HostKey,
+		Signature: sig,
+		Hash:      ecHash(kex.curve),
+	}, serialized, nil
+}
+
 func (kex *ecdh) Server(c packetConn, rand io.Reader, magics *handshakeMagics, priv Signer) (result *kexResult, err error) {
 	packet, err := c.readPacket()
 	if err != nil {
@@ -383,8 +611,8 @@ func init() {
 	// 4253 and Oakley Group 2 in RFC 2409.
 	p, _ := new(big.Int).SetString("FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE65381FFFFFFFFFFFFFFFF", 16)
 	kexAlgoMap[kexAlgoDH1SHA1] = &dhGroup{
-		g: new(big.Int).SetInt64(2),
-		p: p,
+		g:       new(big.Int).SetInt64(2),
+		p:       p,
 		pMinus1: new(big.Int).Sub(p, bigOne),
 	}
 
@@ -393,8 +621,8 @@ func init() {
 	p, _ = new(big.Int).SetString("FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3BE39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6955817183995497CEA956AE515D2261898FA051015728E5A8AACAA68FFFFFFFFFFFFFFFF", 16)
 
 	kexAlgoMap[kexAlgoDH14SHA1] = &dhGroup{
-		g: new(big.Int).SetInt64(2),
-		p: p,
+		g:       new(big.Int).SetInt64(2),
+		p:       p,
 		pMinus1: new(big.Int).Sub(p, bigOne),
 	}
 
@@ -474,6 +702,90 @@ func (kex *curve25519sha256) Client(c packetConn, rand io.Reader, magics *handsh
 		Signature: reply.Signature,
 		Hash:      crypto.SHA256,
 	}, nil
+}
+
+func serverRemoteReq(c packetConn, rand io.Reader, magics *handshakeMagics, priv Signer, kex *kexAlgorithm, kexAlgo string, config *Config) (result *kexResult, authtoken string, err error) {
+	packet, err := c.readPacket()
+	if err != nil {
+		return
+	}
+
+	request := KexRemoteRequest{
+		Magics: KexMagic{
+			ClientVersion: magics.clientVersion,
+			ClientKexInit: magics.clientKexInit,
+			ServerVersion: magics.serverVersion,
+			ServerKexInit: magics.serverKexInit,
+		},
+		InitPkt: packet,
+		KexAlgo: kexAlgo,
+	}
+
+	resp, err := config.RemoteKexService.Request(&request)
+
+	if err := c.writePacket(resp.ResponsePkt); err != nil {
+		return nil, "", err
+	}
+	return resp.Result, resp.AuthToken, nil
+}
+
+func (kex *curve25519sha256) ServerRemoteExec(rand io.Reader, magics *handshakeMagics, priv Signer, clientPacket []byte) (result *kexResult, replyPacket []byte, err error) {
+
+	var kexInit kexECDHInitMsg
+	if err = Unmarshal(clientPacket, &kexInit); err != nil {
+		return
+	}
+
+	if len(kexInit.ClientPubKey) != 32 {
+		return nil, nil, errors.New("ssh: peer's curve25519 public value has wrong length")
+	}
+
+	var kp curve25519KeyPair
+	if err := kp.generate(rand); err != nil {
+		return nil, nil, err
+	}
+
+	var clientPub, secret [32]byte
+	copy(clientPub[:], kexInit.ClientPubKey)
+	curve25519.ScalarMult(&secret, &kp.priv, &clientPub)
+	if subtle.ConstantTimeCompare(secret[:], curve25519Zeros[:]) == 1 {
+		return nil, nil, errors.New("ssh: peer's curve25519 public value has wrong order")
+	}
+
+	hostKeyBytes := priv.PublicKey().Marshal()
+
+	h := crypto.SHA256.New()
+	magics.write(h)
+	writeString(h, hostKeyBytes)
+	writeString(h, kexInit.ClientPubKey)
+	writeString(h, kp.pub[:])
+
+	kInt := new(big.Int).SetBytes(secret[:])
+	K := make([]byte, intLength(kInt))
+	marshalInt(K, kInt)
+	h.Write(K)
+
+	H := h.Sum(nil)
+
+	sig, err := signAndMarshal(priv, rand, H)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	reply := kexECDHReplyMsg{
+		EphemeralPubKey: kp.pub[:],
+		HostKey:         hostKeyBytes,
+		Signature:       sig,
+	}
+	replyData := Marshal(&reply)
+
+	return &kexResult{
+		H:         H,
+		K:         K,
+		HostKey:   hostKeyBytes,
+		Signature: sig,
+		Hash:      crypto.SHA256,
+	}, replyData, nil
 }
 
 func (kex *curve25519sha256) Server(c packetConn, rand io.Reader, magics *handshakeMagics, priv Signer) (result *kexResult, err error) {

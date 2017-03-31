@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"strings"
 )
@@ -54,6 +55,11 @@ type ServerConfig struct {
 	// valid for the given user. For example, see CertChecker.Authenticate.
 	PublicKeyCallback func(conn ConnMetadata, key PublicKey) (*Permissions, error)
 
+	// PublicKeyRemoteAuth, if non-nil, is called when a client attempts public
+	// key authentication. It must return true if the given public key is
+	// valid for the given user. For example, see CertChecker.Authenticate.
+	PublicKeyRemoteAuth RemotePublicKeyAuth
+
 	// KeyboardInteractiveCallback, if non-nil, is called when
 	// keyboard-interactive authentication is selected (RFC
 	// 4256). The client object's Challenge function should be
@@ -73,6 +79,28 @@ type ServerConfig struct {
 	// Note that RFC 4253 section 4.2 requires that this string start with
 	// "SSH-2.0-".
 	ServerVersion string
+}
+
+// RemotePublicKeyAuth is an interface to perform remote public key authentication
+type RemotePublicKeyAuth interface {
+	Request(kexRequest *AuthRequest) (*AuthResponse, error)
+}
+
+// AuthRequest is the query send to the remote authentication server
+type AuthRequest struct {
+	User       string
+	KexToken   string
+	RemoteAddr string
+	Packet     []byte
+}
+
+// AuthResponse is the response received from the remote authentication server
+type AuthResponse struct {
+	KexToken string
+	Cont     bool
+	Perm     *Permissions
+	Packet   []byte
+	Err      string
 }
 
 // AddHostKey adds a private key as a host key. If an existing host
@@ -167,6 +195,7 @@ func signAndMarshal(k Signer, rand io.Reader, data []byte) ([]byte, error) {
 
 // handshake performs key exchange and user authentication.
 func (s *connection) serverHandshake(config *ServerConfig) (*Permissions, error) {
+	fmt.Println("Server handshake")
 	if len(config.hostKeys) == 0 {
 		return nil, errors.New("ssh: server has no host keys")
 	}
@@ -267,10 +296,14 @@ func (s *connection) serverAuthenticate(config *ServerConfig) (*Permissions, err
 	var cache pubKeyCache
 	var perms *Permissions
 
+	if s.authToken == "" {
+		s.authToken = s.transport.authToken
+	}
 userAuthLoop:
 	for {
 		var userAuthReq userAuthRequestMsg
-		if packet, err := s.transport.readPacket(); err != nil {
+		packet, err := s.transport.readPacket()
+		if err != nil {
 			return nil, err
 		} else if err = Unmarshal(packet, &userAuthReq); err != nil {
 			return nil, err
@@ -314,6 +347,46 @@ userAuthLoop:
 			prompter := &sshClientKeyboardInteractive{s}
 			perms, authErr = config.KeyboardInteractiveCallback(s, prompter.Challenge)
 		case "publickey":
+			if config.PublicKeyRemoteAuth != nil {
+				continueLoop := false
+
+				log.Println("Running remote key authentication")
+
+				request := &AuthRequest{
+					User:       s.User(),
+					KexToken:   s.AuthToken(),
+					RemoteAddr: s.RemoteAddr().String(),
+					Packet:     packet,
+				}
+
+				resp, err := config.PublicKeyRemoteAuth.Request(request)
+
+				if resp.Packet != nil {
+					log.Printf("Client just queried its key\n")
+				}
+
+				if resp.Err != "" {
+					log.Printf("Got resp err: %v\n", resp.Err)
+					authErr = errors.New(resp.Err)
+				} else {
+					authErr = nil
+				}
+
+				perms = resp.Perm
+				continueLoop = resp.Cont
+				packet = resp.Packet
+
+				if packet != nil {
+					if err = s.transport.writePacket(packet); err != nil {
+						return nil, err
+					}
+				}
+				if continueLoop {
+					continue userAuthLoop
+				}
+				break
+			}
+
 			if config.PublicKeyCallback == nil {
 				authErr = errors.New("ssh: publickey auth not configured")
 				break
@@ -416,6 +489,10 @@ userAuthLoop:
 		if config.PublicKeyCallback != nil {
 			failureMsg.Methods = append(failureMsg.Methods, "publickey")
 		}
+		if config.PublicKeyRemoteAuth != nil {
+			failureMsg.Methods = append(failureMsg.Methods, "publickey")
+		}
+
 		if config.KeyboardInteractiveCallback != nil {
 			failureMsg.Methods = append(failureMsg.Methods, "keyboard-interactive")
 		}
@@ -488,4 +565,97 @@ func (c *sshClientKeyboardInteractive) Challenge(user, instruction string, quest
 	}
 
 	return answers, nil
+}
+
+// ValidatePublicKey validates a public key
+func ValidatePublicKey(packet []byte, user string, remoteAddr net.Addr, sessionID []byte,
+	PublicKeyCallback func(user string, key PublicKey) (*Permissions, error)) (*Permissions, bool, []byte, error) {
+	var perms *Permissions
+	authErr := errors.New("no auth passed yet")
+	var cache pubKeyCache
+	var userAuthReq userAuthRequestMsg
+	if err := Unmarshal(packet, &userAuthReq); err != nil {
+		return nil, false, nil, err
+	}
+
+	payload := userAuthReq.Payload
+	if len(payload) < 1 {
+		return nil, false, nil, parseError(msgUserAuthRequest)
+	}
+
+	isQuery := payload[0] == 0
+	payload = payload[1:]
+	algoBytes, payload, ok := parseString(payload)
+	if !ok {
+		return nil, false, nil, parseError(msgUserAuthRequest)
+	}
+	algo := string(algoBytes)
+	if !isAcceptableAlgo(algo) {
+		authErr = fmt.Errorf("ssh: algorithm %q not accepted", algo)
+		return nil, false, nil, authErr
+	}
+
+	pubKeyData, payload, ok := parseString(payload)
+	if !ok {
+		return nil, false, nil, parseError(msgUserAuthRequest)
+	}
+
+	pubKey, err := ParsePublicKey(pubKeyData)
+	if err != nil {
+		return nil, false, nil, err
+	}
+
+	candidate, ok := cache.get(user, pubKeyData)
+	if !ok {
+		candidate.user = user
+		candidate.pubKeyData = pubKeyData
+		candidate.perms, candidate.result = PublicKeyCallback(user, pubKey)
+		if candidate.result == nil && candidate.perms != nil && candidate.perms.CriticalOptions != nil && candidate.perms.CriticalOptions[sourceAddressCriticalOption] != "" {
+			candidate.result = checkSourceAddress(
+				remoteAddr,
+				candidate.perms.CriticalOptions[sourceAddressCriticalOption])
+		}
+		cache.add(candidate)
+	}
+
+	if isQuery {
+		// The client can query if the given public key
+		// would be okay.
+		if len(payload) > 0 {
+			return nil, false, nil, parseError(msgUserAuthRequest)
+		}
+
+		if candidate.result == nil {
+			okMsg := userAuthPubKeyOkMsg{
+				Algo:   algo,
+				PubKey: pubKeyData,
+			}
+			response := Marshal(&okMsg)
+			return nil, true, response, authErr
+		}
+		authErr = candidate.result
+	} else {
+		sig, payload, ok := parseSignature(payload)
+		if !ok || len(payload) > 0 {
+			return nil, false, nil, parseError(msgUserAuthRequest)
+		}
+		// Ensure the public key algo and signature algo
+		// are supported.  Compare the private key
+		// algorithm name that corresponds to algo with
+		// sig.Format.  This is usually the same, but
+		// for certs, the names differ.
+		if !isAcceptableAlgo(sig.Format) {
+			authErr = fmt.Errorf("ssh: algorithm %q not accepted", algo)
+			return nil, false, nil, authErr
+		}
+		signedData := buildDataSignedForAuth(sessionID, userAuthReq, algoBytes, pubKeyData)
+
+		if err := pubKey.Verify(signedData, sig); err != nil {
+			return nil, false, nil, err
+		}
+
+		authErr = candidate.result
+		perms = candidate.perms
+	}
+	return perms, false, nil, authErr
 }

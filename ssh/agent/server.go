@@ -17,7 +17,7 @@ import (
 	"math/big"
 
 	"golang.org/x/crypto/ed25519"
-	"github.com/afitzek/crypto/ssh"
+	"github.com/resin-io-playground/go-crypto-fork/ssh"
 )
 
 // Server wraps an Agent and uses it to implement the agent side of

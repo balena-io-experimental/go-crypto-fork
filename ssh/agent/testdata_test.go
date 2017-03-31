@@ -12,8 +12,8 @@ import (
 	"crypto/rand"
 	"fmt"
 
-	"github.com/afitzek/crypto/ssh"
-	"github.com/afitzek/crypto/ssh/testdata"
+	"github.com/resin-io-playground/go-crypto-fork/ssh"
+	"github.com/resin-io-playground/go-crypto-fork/ssh/testdata"
 )
 
 var (

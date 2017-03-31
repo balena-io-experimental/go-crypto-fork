@@ -6,6 +6,7 @@ package ssh
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -89,6 +90,7 @@ type handshakeTransport struct {
 
 	// The session ID or nil if first kex did not complete yet.
 	sessionID []byte
+	authToken string
 }
 
 type pendingKex struct {
@@ -97,6 +99,7 @@ type pendingKex struct {
 }
 
 func newHandshakeTransport(conn keyingTransport, config *Config, clientVersion, serverVersion []byte) *handshakeTransport {
+	fmt.Println("Handshake Transport")
 	t := &handshakeTransport{
 		conn:          conn,
 		serverVersion: serverVersion,
@@ -553,6 +556,7 @@ func (t *handshakeTransport) enterKeyExchange(otherInitPacket []byte) error {
 		}
 	}
 
+	log.Println("Agreed on KEX: ", t.algorithms.kex)
 	kex, ok := kexAlgoMap[t.algorithms.kex]
 	if !ok {
 		return fmt.Errorf("ssh: unexpected key exchange algorithm %v", t.algorithms.kex)
@@ -573,6 +577,7 @@ func (t *handshakeTransport) enterKeyExchange(otherInitPacket []byte) error {
 		t.sessionID = result.H
 	}
 	result.SessionID = t.sessionID
+	log.Println("SessionID (remove from logs again!!!!): ", base64.StdEncoding.EncodeToString(result.SessionID))
 
 	t.conn.prepareKeyChange(t.algorithms, result)
 	if err = t.conn.writePacket([]byte{msgNewKeys}); err != nil {
@@ -595,8 +600,15 @@ func (t *handshakeTransport) server(kex kexAlgorithm, algs *algorithms, magics *
 		}
 	}
 
-	r, err := kex.Server(t.conn, t.config.Rand, magics, hostKey)
-	return r, err
+	if t.config.RemoteKexService != nil {
+		kexResult, authToken, err := serverRemoteReq(t.conn, t.config.Rand, magics, hostKey, &kex, t.algorithms.kex, t.config)
+		if t.authToken == "" {
+			t.authToken = authToken
+		}
+		return kexResult, err
+	}
+
+	return kex.Server(t.conn, t.config.Rand, magics, hostKey)
 }
 
 func (t *handshakeTransport) client(kex kexAlgorithm, algs *algorithms, magics *handshakeMagics) (*kexResult, error) {

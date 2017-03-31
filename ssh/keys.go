@@ -60,6 +60,10 @@ func parsePubKey(in []byte, algo string) (pubKey PublicKey, rest []byte, err err
 	return nil, nil, fmt.Errorf("ssh: unknown key algorithm: %v", algo)
 }
 
+func ParseAuthorizedPublicKey(in []byte) (out PublicKey, comment string, err error) {
+	return parseAuthorizedKey(in)
+}
+
 // parseAuthorizedKey parses a public key in OpenSSH authorized_keys format
 // (see sshd(8) manual page) once the options and key type fields have been
 // removed.
@@ -627,6 +631,25 @@ func (key *ecdsaPublicKey) Verify(data []byte, sig *Signature) error {
 
 func (k *ecdsaPublicKey) CryptoPublicKey() crypto.PublicKey {
 	return (*ecdsa.PublicKey)(k)
+}
+
+type dummySigner struct {
+	publicKey PublicKey
+}
+
+func (k *dummySigner) PublicKey() PublicKey {
+	return k.publicKey
+}
+
+func (k *dummySigner) Sign(rand io.Reader, data []byte) (*Signature, error) {
+	return nil, errors.New("ssh: Host private key not available")
+}
+
+// NewDummySignerFromPublicKey takes an *PublicKey,
+// *ecdsa.PrivateKey or any other crypto.Signer and returns a corresponding
+// Signer instance. ECDSA keys must use P-256, P-384 or P-521.
+func NewDummySignerFromPublicKey(key PublicKey) (Signer, error) {
+	return &dummySigner{key}, nil
 }
 
 // NewSignerFromKey takes an *rsa.PrivateKey, *dsa.PrivateKey,

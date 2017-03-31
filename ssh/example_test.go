@@ -12,8 +12,8 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/afitzek/crypto/ssh"
-	"github.com/afitzek/crypto/ssh/terminal"
+	"github.com/resin-io-playground/go-crypto-fork/ssh"
+	"github.com/resin-io-playground/go-crypto-fork/ssh/terminal"
 )
 
 func ExampleNewServerConn() {

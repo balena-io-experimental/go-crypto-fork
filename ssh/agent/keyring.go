@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/afitzek/crypto/ssh"
+	"github.com/resin-io-playground/go-crypto-fork/ssh"
 )
 
 type privKey struct {

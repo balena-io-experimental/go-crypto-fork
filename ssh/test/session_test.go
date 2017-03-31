@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/afitzek/crypto/ssh"
+	"github.com/resin-io-playground/go-crypto-fork/ssh"
 )
 
 func TestRunCommandSuccess(t *testing.T) {

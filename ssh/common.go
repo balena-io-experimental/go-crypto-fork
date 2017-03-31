@@ -200,6 +200,9 @@ type Config struct {
 	// The allowed MAC algorithms. If unspecified then a sensible default
 	// is used.
 	MACs []string
+
+	// The url to the remote kex service TODO: add client credentials
+	RemoteKexService KexRemote
 }
 
 // SetDefaults sets sensible values for unset fields in config. This is

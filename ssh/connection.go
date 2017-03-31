@@ -41,6 +41,9 @@ type ConnMetadata interface {
 
 	// LocalAddr returns the local address for this connection.
 	LocalAddr() net.Addr
+
+	// AuthToken returns the authentication token generated during the handshake
+	AuthToken() string
 }
 
 // Conn represents an SSH connection for both server and client roles.
@@ -106,6 +109,7 @@ type sshConn struct {
 	sessionID     []byte
 	clientVersion []byte
 	serverVersion []byte
+	authToken     string
 }
 
 func dup(src []byte) []byte {
@@ -140,4 +144,8 @@ func (c *sshConn) ClientVersion() []byte {
 
 func (c *sshConn) ServerVersion() []byte {
 	return dup(c.serverVersion)
+}
+
+func (c *sshConn) AuthToken() string {
+	return c.authToken
 }

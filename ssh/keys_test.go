@@ -18,7 +18,7 @@ import (
 	"testing"
 
 	"golang.org/x/crypto/ed25519"
-	"github.com/afitzek/crypto/ssh/testdata"
+	"github.com/resin-io-playground/go-crypto-fork/ssh/testdata"
 )
 
 func rawKey(pub PublicKey) interface{} {

@@ -10,8 +10,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/afitzek/crypto/ssh"
-	"github.com/afitzek/crypto/ssh/agent"
+	"github.com/resin-io-playground/go-crypto-fork/ssh"
+	"github.com/resin-io-playground/go-crypto-fork/ssh/agent"
 )
 
 func TestAgentForward(t *testing.T) {

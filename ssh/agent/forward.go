@@ -10,7 +10,7 @@ import (
 	"net"
 	"sync"
 
-	"github.com/afitzek/crypto/ssh"
+	"github.com/resin-io-playground/go-crypto-fork/ssh"
 )
 
 // RequestAgentForwarding sets up agent forwarding for the session.

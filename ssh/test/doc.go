@@ -3,5 +3,5 @@
 // license that can be found in the LICENSE file.
 
 // This package contains integration tests for the
-// github.com/afitzek/crypto/ssh package.
-package test // import "github.com/afitzek/crypto/ssh/test"
+// github.com/resin-io-playground/go-crypto-fork/ssh package.
+package test // import "github.com/resin-io-playground/go-crypto-fork/ssh/test"

@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/afitzek/crypto/ssh"
+	"github.com/resin-io-playground/go-crypto-fork/ssh"
 )
 
 // startAgent executes ssh-agent, and returns a Agent interface to it.
